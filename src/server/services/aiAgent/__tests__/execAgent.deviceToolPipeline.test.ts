@@ -98,7 +98,11 @@ vi.mock('@/server/services/file', () => ({
 
 vi.mock('@/server/modules/Mecha', () => {
   // Return the hoisted mocks so each test can configure them
-  mockGenerateToolsDetailed.mockReturnValue({ enabledToolIds: [], tools: [] });
+  mockGenerateToolsDetailed.mockReturnValue({
+    enabledManifests: [],
+    enabledToolIds: [],
+    tools: [],
+  });
   mockGetEnabledPluginManifests.mockReturnValue(new Map());
 
   mockCreateServerAgentToolsEngine.mockReturnValue({
@@ -164,7 +168,11 @@ describe('AiAgentService.execAgent - device tool pipeline (LOBE-5636)', () => {
     });
     mockQueryDeviceList.mockResolvedValue([]);
     mockPluginQuery.mockResolvedValue([]);
-    mockGenerateToolsDetailed.mockReturnValue({ enabledToolIds: [], tools: [] });
+    mockGenerateToolsDetailed.mockReturnValue({
+      enabledManifests: [],
+      enabledToolIds: [],
+      tools: [],
+    });
     mockGetEnabledPluginManifests.mockReturnValue(new Map());
     service = new AiAgentService(mockDb, userId);
   });
@@ -181,14 +189,14 @@ describe('AiAgentService.execAgent - device tool pipeline (LOBE-5636)', () => {
       expect(toolIds).toContain(RemoteDeviceManifest.identifier);
     });
 
-    it('should pass RemoteDevice identifier in pluginIds to getEnabledPluginManifests', async () => {
+    it('should include RemoteDevice in pluginIds passed to generateToolsDetailed', async () => {
       mockGetAgentConfig.mockResolvedValue(createBaseAgentConfig());
 
       await service.execAgent({ agentId: 'agent-1', prompt: 'Hello' });
 
-      expect(mockGetEnabledPluginManifests).toHaveBeenCalledTimes(1);
-      const pluginIds = mockGetEnabledPluginManifests.mock.calls[0][0];
-      expect(pluginIds).toContain(RemoteDeviceManifest.identifier);
+      expect(mockGenerateToolsDetailed).toHaveBeenCalledTimes(1);
+      const toolIds = mockGenerateToolsDetailed.mock.calls[0][0].toolIds;
+      expect(toolIds).toContain(RemoteDeviceManifest.identifier);
     });
   });
 
@@ -274,14 +282,16 @@ describe('AiAgentService.execAgent - device tool pipeline (LOBE-5636)', () => {
         { deviceId: 'dev-1', deviceName: 'My PC', platform: 'win32' },
       ]);
 
-      // ToolsEngine returns RemoteDevice in manifestMap (enabled by enableChecker)
+      // ToolsEngine returns RemoteDevice in enabledManifests (enabled by enableChecker)
       const remoteDeviceManifestFromEngine = {
         ...RemoteDeviceManifest,
         systemRole: 'original static systemRole',
       };
-      mockGetEnabledPluginManifests.mockReturnValue(
-        new Map([[RemoteDeviceManifest.identifier, remoteDeviceManifestFromEngine]]),
-      );
+      mockGenerateToolsDetailed.mockReturnValue({
+        enabledManifests: [remoteDeviceManifestFromEngine],
+        enabledToolIds: [RemoteDeviceManifest.identifier],
+        tools: [],
+      });
 
       mockGetAgentConfig.mockResolvedValue(createBaseAgentConfig());
 
@@ -305,8 +315,12 @@ describe('AiAgentService.execAgent - device tool pipeline (LOBE-5636)', () => {
       const { deviceProxy } = await import('@/server/services/toolExecution/deviceProxy');
       vi.spyOn(deviceProxy, 'isConfigured', 'get').mockReturnValue(false);
 
-      // ToolsEngine returns empty manifestMap (RemoteDevice disabled by enableChecker)
-      mockGetEnabledPluginManifests.mockReturnValue(new Map());
+      // ToolsEngine returns empty enabledManifests (RemoteDevice disabled by enableChecker)
+      mockGenerateToolsDetailed.mockReturnValue({
+        enabledManifests: [],
+        enabledToolIds: [],
+        tools: [],
+      });
 
       mockGetAgentConfig.mockResolvedValue(createBaseAgentConfig());
 
@@ -327,9 +341,11 @@ describe('AiAgentService.execAgent - device tool pipeline (LOBE-5636)', () => {
       const { deviceProxy } = await import('@/server/services/toolExecution/deviceProxy');
       vi.spyOn(deviceProxy, 'isConfigured', 'get').mockReturnValue(false);
 
-      mockGetEnabledPluginManifests.mockReturnValue(
-        new Map([[LocalSystemManifest.identifier, LocalSystemManifest]]),
-      );
+      mockGenerateToolsDetailed.mockReturnValue({
+        enabledManifests: [LocalSystemManifest],
+        enabledToolIds: [LocalSystemManifest.identifier],
+        tools: [],
+      });
       mockGetAgentConfig.mockResolvedValue(createBaseAgentConfig());
 
       await service.execAgent({ agentId: 'agent-1', prompt: 'Hello' });
@@ -345,9 +361,11 @@ describe('AiAgentService.execAgent - device tool pipeline (LOBE-5636)', () => {
         { deviceId: 'dev-1', deviceName: 'My PC', platform: 'win32' },
       ]);
 
-      mockGetEnabledPluginManifests.mockReturnValue(
-        new Map([[LocalSystemManifest.identifier, LocalSystemManifest]]),
-      );
+      mockGenerateToolsDetailed.mockReturnValue({
+        enabledManifests: [LocalSystemManifest],
+        enabledToolIds: [LocalSystemManifest.identifier],
+        tools: [],
+      });
       mockGetAgentConfig.mockResolvedValue(createBaseAgentConfig());
 
       await service.execAgent({ agentId: 'agent-1', prompt: 'Hello' });
@@ -368,7 +386,11 @@ describe('AiAgentService.execAgent - device tool pipeline (LOBE-5636)', () => {
       };
 
       mockPluginQuery.mockResolvedValue([stdioPlugin]);
-      mockGetEnabledPluginManifests.mockReturnValue(new Map([['my-stdio-mcp', stdioManifest]]));
+      mockGenerateToolsDetailed.mockReturnValue({
+        enabledManifests: [stdioManifest],
+        enabledToolIds: ['my-stdio-mcp'],
+        tools: [],
+      });
       mockGetAgentConfig.mockResolvedValue(createBaseAgentConfig({ plugins: ['my-stdio-mcp'] }));
 
       const { deviceProxy } = await import('@/server/services/toolExecution/deviceProxy');
@@ -405,9 +427,11 @@ describe('AiAgentService.execAgent - device tool pipeline (LOBE-5636)', () => {
         { deviceId: 'dev-1', deviceName: 'Remote VM', platform: 'linux' },
       ]);
 
-      mockGetEnabledPluginManifests.mockReturnValue(
-        new Map([[LocalSystemManifest.identifier, LocalSystemManifest]]),
-      );
+      mockGenerateToolsDetailed.mockReturnValue({
+        enabledManifests: [LocalSystemManifest],
+        enabledToolIds: [LocalSystemManifest.identifier],
+        tools: [],
+      });
       mockGetAgentConfig.mockResolvedValue(createBaseAgentConfig());
 
       await service.execAgent({
@@ -438,7 +462,11 @@ describe('AiAgentService.execAgent - device tool pipeline (LOBE-5636)', () => {
       ]);
 
       mockPluginQuery.mockResolvedValue([stdioPlugin]);
-      mockGetEnabledPluginManifests.mockReturnValue(new Map([['my-stdio-mcp', stdioManifest]]));
+      mockGenerateToolsDetailed.mockReturnValue({
+        enabledManifests: [stdioManifest],
+        enabledToolIds: ['my-stdio-mcp'],
+        tools: [],
+      });
       mockGetAgentConfig.mockResolvedValue(createBaseAgentConfig({ plugins: ['my-stdio-mcp'] }));
 
       await service.execAgent({
@@ -460,9 +488,11 @@ describe('AiAgentService.execAgent - device tool pipeline (LOBE-5636)', () => {
         { deviceId: 'dev-1', deviceName: 'Remote VM', platform: 'linux' },
       ]);
 
-      mockGetEnabledPluginManifests.mockReturnValue(
-        new Map([[LocalSystemManifest.identifier, LocalSystemManifest]]),
-      );
+      mockGenerateToolsDetailed.mockReturnValue({
+        enabledManifests: [LocalSystemManifest],
+        enabledToolIds: [LocalSystemManifest.identifier],
+        tools: [],
+      });
       mockGetAgentConfig.mockResolvedValue(createBaseAgentConfig());
 
       await service.execAgent({
@@ -477,13 +507,17 @@ describe('AiAgentService.execAgent - device tool pipeline (LOBE-5636)', () => {
   });
 
   describe('toolManifestMap fully derived from ToolsEngine', () => {
-    it('should derive manifestMap entirely from getEnabledPluginManifests', async () => {
+    it('should derive manifestMap from generateToolsDetailed enabledManifests', async () => {
       const mockManifest = {
         api: [{ description: 'test', name: 'action', parameters: {} }],
         identifier: 'test-tool',
         meta: { title: 'Test' },
       };
-      mockGetEnabledPluginManifests.mockReturnValue(new Map([['test-tool', mockManifest]]));
+      mockGenerateToolsDetailed.mockReturnValue({
+        enabledManifests: [mockManifest],
+        enabledToolIds: ['test-tool'],
+        tools: [],
+      });
 
       mockGetAgentConfig.mockResolvedValue(createBaseAgentConfig({ plugins: ['test-tool'] }));
 
@@ -493,7 +527,6 @@ describe('AiAgentService.execAgent - device tool pipeline (LOBE-5636)', () => {
       const manifestMap = callArgs.toolSet.manifestMap;
 
       expect(manifestMap['test-tool']).toBe(mockManifest);
-      // manifestMap also includes discoverable builtin tools for activator discovery
       expect(Object.keys(manifestMap)).toContain('test-tool');
     });
   });

@@ -16,6 +16,8 @@ import { getAgentStoreState } from '@/store/agent';
 import { agentSelectors, chatConfigByIdSelectors } from '@/store/agent/selectors';
 import { getChatGroupStoreState } from '@/store/agentGroup';
 import { agentGroupByIdSelectors, agentGroupSelectors } from '@/store/agentGroup/selectors';
+import { getServerConfigStoreState } from '@/store/serverConfig';
+import { serverConfigSelectors } from '@/store/serverConfig/selectors';
 import { useUserStore } from '@/store/user';
 import { userGeneralSettingsSelectors } from '@/store/user/selectors';
 import { isDev } from '@/utils/env';
@@ -398,6 +400,18 @@ export const resolveAgentConfig = (ctx: AgentConfigResolverContext): ResolvedAge
     runtimeConfig?.plugins && runtimeConfig.plugins.length > 0
       ? runtimeConfig.plugins
       : basePlugins;
+
+  // When tool discovery is disabled, strip plugins that were injected by the
+  // builtin runtime but NOT originally in the user's config (basePlugins).
+  // This prevents e.g. INBOX auto-adding lobe-agent-documents.
+  const serverConfigState = getServerConfigStoreState();
+  const disableToolDiscovery = serverConfigState
+    ? serverConfigSelectors.disableToolDiscovery(serverConfigState)
+    : false;
+  if (disableToolDiscovery && runtimeConfig?.plugins && runtimeConfig.plugins.length > 0) {
+    const originalPlugins = new Set(basePlugins);
+    finalPlugins = finalPlugins.filter((id) => originalPlugins.has(id));
+  }
 
   // Merge chatConfig: runtime chatConfig overrides base chatConfig
   let resolvedChatConfig: LobeAgentChatConfig = {

@@ -60,10 +60,34 @@ describe('createEnableChecker', () => {
   });
 
   describe('allowExplicitActivation', () => {
-    it('should bypass rules when isExplicitActivation is true', () => {
+    it('should still respect rules that explicitly disable a tool', () => {
       const checker = createEnableChecker({
         allowExplicitActivation: true,
         rules: { 'web-search': false },
+      });
+
+      // A rule that says false (e.g. runtime condition) is respected even during explicit activation
+      expect(checker(makeParams('web-search', { context: { isExplicitActivation: true } }))).toBe(
+        false,
+      );
+    });
+
+    it('should enable tools with no rule when isExplicitActivation is true', () => {
+      const checker = createEnableChecker({
+        allowExplicitActivation: true,
+        rules: { 'web-search': false },
+      });
+
+      // A tool not mentioned in rules at all can be activated explicitly
+      expect(checker(makeParams('unknown-tool', { context: { isExplicitActivation: true } }))).toBe(
+        true,
+      );
+    });
+
+    it('should enable tools with a true rule when isExplicitActivation is true', () => {
+      const checker = createEnableChecker({
+        allowExplicitActivation: true,
+        rules: { 'web-search': true },
       });
 
       expect(checker(makeParams('web-search', { context: { isExplicitActivation: true } }))).toBe(
@@ -89,6 +113,14 @@ describe('createEnableChecker', () => {
       });
 
       expect(checker(makeParams('web-search'))).toBe(false);
+    });
+
+    it('should not enable unruled tools when isExplicitActivation is not set', () => {
+      const checker = createEnableChecker({
+        allowExplicitActivation: true,
+      });
+
+      expect(checker(makeParams('unknown-tool'))).toBe(false);
     });
   });
 
@@ -200,7 +232,7 @@ describe('createEnableChecker', () => {
   });
 
   describe('priority order', () => {
-    it('should apply: explicitActivation > platformFilter > rules > default', () => {
+    it('should apply: platformFilter > rules > explicitActivation > default', () => {
       const checker = createEnableChecker({
         allowExplicitActivation: true,
         platformFilter: ({ pluginId }) => {
@@ -210,18 +242,25 @@ describe('createEnableChecker', () => {
         rules: { 'rule-blocked': false },
       });
 
-      // Explicit activation bypasses everything
+      // Platform filter blocks even during explicit activation
       expect(
         checker(makeParams('platform-blocked', { context: { isExplicitActivation: true } })),
-      ).toBe(true);
+      ).toBe(false);
 
       // Platform filter blocks
       expect(checker(makeParams('platform-blocked'))).toBe(false);
 
-      // Rule blocks
-      expect(checker(makeParams('rule-blocked'))).toBe(false);
+      // Rule blocks even during explicit activation
+      expect(checker(makeParams('rule-blocked', { context: { isExplicitActivation: true } }))).toBe(
+        false,
+      );
 
-      // Default disables
+      // Explicit activation enables tools with no rule
+      expect(checker(makeParams('other-tool', { context: { isExplicitActivation: true } }))).toBe(
+        true,
+      );
+
+      // Default disables when not explicitly activated
       expect(checker(makeParams('other-tool'))).toBe(false);
     });
   });

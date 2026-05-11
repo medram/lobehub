@@ -14,7 +14,9 @@ const {
 } = vi.hoisted(() => ({
   mockCreateOperation: vi.fn(),
   mockCreateServerAgentToolsEngine: vi.fn().mockReturnValue({
-    generateToolsDetailed: vi.fn().mockReturnValue({ enabledToolIds: [], tools: [] }),
+    generateToolsDetailed: vi
+      .fn()
+      .mockReturnValue({ enabledManifests: [], enabledToolIds: [], tools: [] }),
     getEnabledPluginManifests: vi.fn().mockReturnValue(new Map()),
   }),
   mockGetAgentConfig: vi.fn(),

@@ -407,10 +407,13 @@ export const createRuntimeExecutors = (
           );
         }
 
-        // Fetch agent documents for context injection
+        // Fetch agent documents for context injection — only when the agent-documents
+        // tool is enabled. When DISABLE_TOOL_DISCOVERY=1 and the tool isn't explicitly
+        // assigned, skip fetching so documents don't leak into the system prompt.
         let agentDocuments: AgentContextDocument[] | undefined;
         const agentId = state.metadata?.agentId;
-        if (agentId && ctx.serverDB && ctx.userId) {
+        const isAgentDocsEnabled = resolved.enabledToolIds.includes('lobe-agent-documents');
+        if (isAgentDocsEnabled && agentId && ctx.serverDB && ctx.userId) {
           try {
             const agentDocService = new AgentDocumentsService(ctx.serverDB, ctx.userId);
             const docs = await agentDocService.getAgentDocuments(agentId);

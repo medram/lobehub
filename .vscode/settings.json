@@ -20,6 +20,15 @@
     // support mdx
     "mdx"
   ],
+  "i18n-ally.localesPaths": [
+    "locales",
+    "src/locales",
+    "src/utils/i18n",
+    "apps/desktop/resources/locales",
+    "apps/desktop/src/main/locales",
+    "packages/context-engine/src/engine/messages",
+    "packages/database/src/models/__tests__/messages"
+  ],
   "js/ts.tsdk.path": "node_modules/typescript/lib",
   "npm.packageManager": "pnpm",
   "search.exclude": {

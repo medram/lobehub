@@ -14,6 +14,8 @@ import { type ChatCompletionTool, type ToolManifest, type WorkingModel } from '@
 import { isToolAvailableInCurrentEnv } from '@/helpers/toolAvailability';
 import { getAgentStoreState } from '@/store/agent';
 import { agentChatConfigSelectors, agentSelectors } from '@/store/agent/selectors';
+import { getServerConfigStoreState } from '@/store/serverConfig';
+import { serverConfigSelectors } from '@/store/serverConfig/selectors';
 import { getToolStoreState } from '@/store/tool';
 import {
   klavisStoreSelectors,
@@ -125,11 +127,44 @@ export const createAgentToolsEngine = (
   const searchConfig = getSearchConfig(workingModel.model, workingModel.provider);
   const agentState = getAgentStoreState();
   const userPlugins = agentSelectors.currentAgentPlugins(agentState);
+  const isManualMode =
+    agentChatConfigSelectors.currentChatConfig(agentState).skillActivateMode === 'manual';
+  const serverConfigState = getServerConfigStoreState();
+  const disableToolDiscovery = serverConfigState
+    ? serverConfigSelectors.disableToolDiscovery(serverConfigState)
+    : false;
+
+  // When tool discovery is disabled, the agent gets ONLY the tools explicitly
+  // assigned via plugins — no defaults, no always-on, no runtime-managed
+  // auto-injection.
+  const enableRules: Record<string, boolean> = {
+    // Runtime-resolved plugins (from agentConfigResolver for the effective agent)
+    ...(pluginIds && Object.fromEntries(pluginIds.map((id) => [id, true]))),
+    // User-selected plugins (from the active agent)
+    ...Object.fromEntries(userPlugins.map((id) => [id, true])),
+  };
+
+  if (!disableToolDiscovery) {
+    // Always-on builtin tools (activator, skills, skill-store)
+    Object.assign(enableRules, Object.fromEntries(alwaysOnToolIds.map((id) => [id, true])));
+
+    // Runtime-managed rules — auto-enable tools based on system conditions
+    Object.assign(enableRules, {
+      [CloudSandboxManifest.identifier]: agentChatConfigSelectors.isCloudSandboxEnabled(agentState),
+      [KnowledgeBaseManifest.identifier]: agentSelectors.hasEnabledKnowledgeBases(agentState),
+      [LocalSystemManifest.identifier]: agentChatConfigSelectors.isLocalSystemEnabled(agentState),
+      [MemoryManifest.identifier]:
+        agentChatConfigSelectors.currentChatConfig(agentState).memory?.enabled ??
+        settingsSelectors.memoryEnabled(useUserStore.getState()),
+      [WebBrowsingManifest.identifier]: searchConfig.useApplicationBuiltinSearchTool,
+    });
+  }
 
   return createToolsEngine({
-    defaultToolIds,
+    // When tool discovery is disabled, skip default tools — only user-selected tools are used
+    defaultToolIds: disableToolDiscovery ? undefined : defaultToolIds,
     enableChecker: createEnableChecker({
-      allowExplicitActivation: true,
+      allowExplicitActivation: !isManualMode && !disableToolDiscovery,
       platformFilter: ({ pluginId }) => {
         const toolStoreState = getToolStoreState();
         const installedPlugin = pluginSelectors.getInstalledPluginById(pluginId)(toolStoreState);
@@ -144,24 +179,7 @@ export const createAgentToolsEngine = (
 
         return undefined; // fall through to rules
       },
-      rules: {
-        // Runtime-resolved plugins (from agentConfigResolver for the effective agent,
-        // may include sub-agent/group/page scope plugins not on the active agent)
-        ...(pluginIds && Object.fromEntries(pluginIds.map((id) => [id, true]))),
-        // User-selected plugins (from the active agent)
-        ...Object.fromEntries(userPlugins.map((id) => [id, true])),
-        // Always-on builtin tools
-        ...Object.fromEntries(alwaysOnToolIds.map((id) => [id, true])),
-        // System-level rules (may override user selection for specific tools)
-        [CloudSandboxManifest.identifier]:
-          agentChatConfigSelectors.isCloudSandboxEnabled(agentState),
-        [KnowledgeBaseManifest.identifier]: agentSelectors.hasEnabledKnowledgeBases(agentState),
-        [LocalSystemManifest.identifier]: agentChatConfigSelectors.isLocalSystemEnabled(agentState),
-        [MemoryManifest.identifier]:
-          agentChatConfigSelectors.currentChatConfig(agentState).memory?.enabled ??
-          settingsSelectors.memoryEnabled(useUserStore.getState()),
-        [WebBrowsingManifest.identifier]: searchConfig.useApplicationBuiltinSearchTool,
-      },
+      rules: enableRules,
     }),
   });
 };

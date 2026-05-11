@@ -99,6 +99,7 @@ export const createServerAgentToolsEngine = (
     clientRuntime,
     deviceContext,
     disableLocalSystem = false,
+    disableToolDiscovery = false,
     globalMemoryEnabled = false,
     hasAgentDocuments = false,
     hasEnabledKnowledgeBases = false,
@@ -138,6 +139,7 @@ export const createServerAgentToolsEngine = (
 
   const searchMode = agentConfig.chatConfig?.searchMode ?? 'auto';
   const isSearchEnabled = searchMode !== 'off';
+  const isManualMode = agentConfig.chatConfig?.skillActivateMode === 'manual';
 
   log(
     'Creating agent tools engine model=%s provider=%s searchMode=%s platform=%s runtimeMode=%s additionalManifests=%d hasClientExecutor=%s hasDeviceProxy=%s canUseDevice=%s',
@@ -152,54 +154,45 @@ export const createServerAgentToolsEngine = (
     canUseDevice,
   );
 
+  // When tool discovery is disabled, the agent gets ONLY the tools explicitly
+  // assigned via agentConfig.plugins — no defaults, no always-on, no
+  // runtime-managed auto-injection.
+  const enableRules: Record<string, boolean> = {
+    // User-selected plugins — always respected
+    ...Object.fromEntries((agentConfig.plugins ?? []).map((id) => [id, true])),
+  };
+
+  if (!disableToolDiscovery) {
+    // Always-on builtin tools (activator, skills, skill-store)
+    Object.assign(enableRules, Object.fromEntries(alwaysOnToolIds.map((id) => [id, true])));
+
+    // Runtime-managed rules — auto-enable tools based on system conditions
+    Object.assign(enableRules, {
+      [CloudSandboxManifest.identifier]: runtimeMode === 'cloud',
+      [KnowledgeBaseManifest.identifier]: hasEnabledKnowledgeBases,
+      [LocalSystemManifest.identifier]:
+        canUseDevice &&
+        !disableLocalSystem &&
+        runtimeMode === 'local' &&
+        (hasClientExecutor ||
+          (hasDeviceProxy && !!deviceContext?.deviceOnline && !!deviceContext?.autoActivated)),
+      [MemoryManifest.identifier]: globalMemoryEnabled,
+      ...(isBotConversation && { [MessageManifest.identifier]: true }),
+      [RemoteDeviceManifest.identifier]:
+        canUseDevice && hasDeviceProxy && !deviceContext?.autoActivated && !hasClientExecutor,
+      [AgentDocumentsManifest.identifier]: hasAgentDocuments,
+      [WebBrowsingManifest.identifier]: isSearchEnabled,
+    });
+  }
+
   return createServerToolsEngine(context, {
     // Pass additional manifests (e.g., LobeHub Skills)
     additionalManifests,
-    // Add default tools based on configuration
-    defaultToolIds,
+    // When tool discovery is disabled, skip default tools — only user-selected tools are used
+    defaultToolIds: disableToolDiscovery ? undefined : defaultToolIds,
     enableChecker: createEnableChecker({
-      // Allow lobe-activator to dynamically enable tools at runtime (e.g., lobe-creds, lobe-cron)
-      allowExplicitActivation: true,
-      rules: {
-        // User-selected plugins
-        ...Object.fromEntries((agentConfig.plugins ?? []).map((id) => [id, true])),
-        // Always-on builtin tools
-        ...Object.fromEntries(alwaysOnToolIds.map((id) => [id, true])),
-        // System-level rules (may override user selection for specific tools)
-        [CloudSandboxManifest.identifier]: runtimeMode === 'cloud',
-        [KnowledgeBaseManifest.identifier]: hasEnabledKnowledgeBases,
-        // Local-system: gated by `canUseDevice` (resolveDeviceAccessPolicy)
-        // first — keeps external bot senders out before runtime checks even
-        // run. Then user must have opted into local runtime on this platform
-        // (`runtimeMode === 'local'`), AND one execution channel must exist:
-        //  - `hasClientExecutor` — Phase 6.4 dispatch over the Agent Gateway
-        //    WS that this request is already riding on; no extra server-side
-        //    prerequisite needed;
-        //  - legacy device-proxy with an online & auto-activated device.
-        [LocalSystemManifest.identifier]:
-          canUseDevice &&
-          !disableLocalSystem &&
-          runtimeMode === 'local' &&
-          (hasClientExecutor ||
-            (hasDeviceProxy && !!deviceContext?.deviceOnline && !!deviceContext?.autoActivated)),
-        [MemoryManifest.identifier]: globalMemoryEnabled,
-        // Only auto-enable in bot conversations; otherwise let user's plugin selection take effect
-        ...(isBotConversation && { [MessageManifest.identifier]: true }),
-        // Remote-device proxy: shown only when the server has a proxy but
-        // no specific device is auto-activated yet (user must pick). When
-        // the caller itself can execute `executor: 'client'` tools, the
-        // proxy is redundant — local-system goes directly to the caller.
-        //
-        // `canUseDevice` is the first short-circuit: external bot senders
-        // (and unconfigured bot owners) never reach the proxy, both because
-        // it would let them poke at the owner's machine AND because its
-        // systemRole would otherwise leak the device list into the LLM
-        // context — see the gated injection in `aiAgent.execAgent`.
-        [RemoteDeviceManifest.identifier]:
-          canUseDevice && hasDeviceProxy && !deviceContext?.autoActivated && !hasClientExecutor,
-        [AgentDocumentsManifest.identifier]: hasAgentDocuments,
-        [WebBrowsingManifest.identifier]: isSearchEnabled,
-      },
+      allowExplicitActivation: !isManualMode && !disableToolDiscovery,
+      rules: enableRules,
     }),
   });
 };

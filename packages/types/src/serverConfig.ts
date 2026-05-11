@@ -61,6 +61,12 @@ export interface GlobalServerConfig {
   aiProvider: ServerLanguageModel;
   defaultAgent?: PartialDeep<UserDefaultAgent>;
   disableEmailPassword?: boolean;
+  /**
+   * When true, the tool discovery system is disabled:
+   * lobe-activator, lobe-skills, and lobe-skill-store are removed from the
+   * tool set, and the available-tools list is not injected into the prompt.
+   */
+  disableToolDiscovery?: boolean;
   enableBusinessFeatures?: boolean;
   /**
    * @deprecated

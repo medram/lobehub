@@ -40,6 +40,7 @@ export interface ServerCreateAgentToolsEngineParams {
     chatConfig?: {
       runtimeEnv?: RuntimeEnvConfig;
       searchMode?: 'off' | 'on' | 'auto';
+      skillActivateMode?: 'auto' | 'manual';
     };
     /** Plugin IDs enabled for this agent */
     plugins?: string[];
@@ -70,6 +71,12 @@ export interface ServerCreateAgentToolsEngineParams {
   };
   /** Whether to suppress the local-system builtin while preserving other tools. */
   disableLocalSystem?: boolean;
+  /**
+   * When true, removes lobe-activator, lobe-skills, and lobe-skill-store from
+   * the tool set entirely. The available-tools list is also suppressed from the
+   * system prompt. Controlled by the DISABLE_TOOL_DISCOVERY env var.
+   */
+  disableToolDiscovery?: boolean;
   /** Whether the user's global memory setting is enabled */
   globalMemoryEnabled?: boolean;
   /** Whether agent has agent documents */

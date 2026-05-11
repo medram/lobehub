@@ -133,6 +133,14 @@ const isVisualUnderstandingConfigured = () => {
   }
 };
 
+const isToolDiscoveryDisabled = () => {
+  try {
+    return !!toolsEnv.DISABLE_TOOL_DISCOVERY;
+  } catch {
+    return false;
+  }
+};
+
 /**
  * Internal params for execAgent with step lifecycle callbacks
  * This extends the public ExecAgentParams with server-side only options
@@ -408,7 +416,15 @@ export class AiAgentService {
         }
         // Runtime plugins merged (runtime plugins take priority if provided)
         if (runtimeConfig.plugins && runtimeConfig.plugins.length > 0) {
-          agentConfig.plugins = runtimeConfig.plugins;
+          // When tool discovery is disabled, strip plugins that were injected
+          // by the builtin runtime but NOT originally in the user's config.
+          // This prevents e.g. INBOX auto-adding lobe-agent-documents.
+          if (isToolDiscoveryDisabled()) {
+            const originalPlugins = new Set(agentConfig.plugins ?? []);
+            agentConfig.plugins = runtimeConfig.plugins.filter((id) => originalPlugins.has(id));
+          } else {
+            agentConfig.plugins = runtimeConfig.plugins;
+          }
           log('execAgent: merged builtin agent runtime plugins for slug=%s', agentSlug);
         }
       }
@@ -825,7 +841,12 @@ export class AiAgentService {
 
     // 5. Tool discovery — short-circuit when disableTools is set
     let tools: any[] | undefined;
-    let toolsResult: { enabledToolIds: string[]; tools?: any[] | undefined } = {
+    let toolsResult: {
+      enabledManifests: any[];
+      enabledToolIds: string[];
+      tools?: any[] | undefined;
+    } = {
+      enabledManifests: [],
       enabledToolIds: [],
       tools: undefined,
     };
@@ -1040,6 +1061,7 @@ export class AiAgentService {
             }
           : undefined,
         disableLocalSystem,
+        disableToolDiscovery: isToolDiscoveryDisabled(),
         globalMemoryEnabled,
         hasAgentDocuments,
         hasEnabledKnowledgeBases,
@@ -1073,35 +1095,40 @@ export class AiAgentService {
       tools = toolsResult.tools;
       log('execAgent: enabled tool ids: %O', toolsResult.enabledToolIds);
 
-      // Start with the scoped manifest map (pluginIds + defaultToolIds)
-      const manifestMap = toolsEngine.getEnabledPluginManifests(pluginIds);
-      manifestMap.forEach((manifest, id) => {
-        toolManifestMap[id] = manifest;
-      });
+      // Build manifest map from the already-filtered enabledManifests (respects enableChecker).
+      // Previously used getEnabledPluginManifests() which bypassed the enableChecker and
+      // included disabled tools (e.g. agent-documents when DISABLE_TOOL_DISCOVERY=1).
+      for (const manifest of toolsResult.enabledManifests) {
+        toolManifestMap[manifest.identifier] = manifest;
+      }
 
       // Also include discoverable builtin tools that are not yet in the map,
       // so the activator can find their manifests when dynamically enabling them
       // (e.g., lobe-creds, lobe-cron). Exclude discoverable:false tools to prevent
       // internal infrastructure tools from being surfaced to the activator.
-      for (const tool of builtinTools) {
-        if (disableLocalSystem && tool.identifier === LocalSystemManifest.identifier) {
-          continue;
+      // In manual mode or when tool discovery is disabled via env var, skip
+      // discoverable expansion entirely — the activator is not available.
+      if (!isManualMode && !isToolDiscoveryDisabled()) {
+        for (const tool of builtinTools) {
+          if (disableLocalSystem && tool.identifier === LocalSystemManifest.identifier) {
+            continue;
+          }
+
+          if (tool.discoverable !== false && !toolManifestMap[tool.identifier]) {
+            toolManifestMap[tool.identifier] = tool.manifest as LobeToolManifest;
+          }
         }
 
-        if (tool.discoverable !== false && !toolManifestMap[tool.identifier]) {
-          toolManifestMap[tool.identifier] = tool.manifest as LobeToolManifest;
+        // Include lobehub skill and klavis manifests for activator discovery
+        for (const manifest of lobehubSkillManifests) {
+          if (!toolManifestMap[manifest.identifier]) {
+            toolManifestMap[manifest.identifier] = manifest;
+          }
         }
-      }
-
-      // Include lobehub skill and klavis manifests for activator discovery
-      for (const manifest of lobehubSkillManifests) {
-        if (!toolManifestMap[manifest.identifier]) {
-          toolManifestMap[manifest.identifier] = manifest;
-        }
-      }
-      for (const manifest of klavisManifests) {
-        if (!toolManifestMap[manifest.identifier]) {
-          toolManifestMap[manifest.identifier] = manifest;
+        for (const manifest of klavisManifests) {
+          if (!toolManifestMap[manifest.identifier]) {
+            toolManifestMap[manifest.identifier] = manifest;
+          }
         }
       }
 
@@ -1142,7 +1169,7 @@ export class AiAgentService {
         }
         // Stdio MCP plugins: subprocess lives on the user's machine
         for (const plugin of installedPlugins) {
-          if (plugin.customParams?.mcp?.type === 'stdio' && manifestMap.has(plugin.identifier)) {
+          if (plugin.customParams?.mcp?.type === 'stdio' && toolManifestMap[plugin.identifier]) {
             toolExecutorMap[plugin.identifier] = 'client';
           }
         }
