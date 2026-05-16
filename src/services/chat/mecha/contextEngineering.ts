@@ -652,8 +652,12 @@ export const contextEngineering = async ({
       isCanUseVision,
     },
 
-    // File context configuration
-    fileContext: { enabled: true, includeFileUrl: false },
+    // File context configuration – respect server config for includeFileUrl
+    fileContext: {
+      enabled: true,
+      includeFileUrl:
+        window.global_serverConfigStore?.getState()?.serverConfig?.includeFileUrlInContext ?? false,
+    },
 
     // Knowledge injection
     knowledge: {
