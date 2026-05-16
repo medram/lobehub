@@ -4,9 +4,10 @@ on:
   workflow_dispatch: {}
   push:
     branches:
-      - canary
-      - main
-      - 'fix/**'
+      - custom
+      # - canary
+      # - main
+      # - 'fix/**'
 
 env:
   IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/lobehub
