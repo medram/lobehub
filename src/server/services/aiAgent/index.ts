@@ -263,7 +263,10 @@ export class AiAgentService {
     this.taskModel = new TaskModel(db, userId);
     this.threadModel = new ThreadModel(db, userId);
     this.topicModel = new TopicModel(db, userId);
-    this.agentRuntimeService = new AgentRuntimeService(db, userId, options?.runtimeOptions);
+    this.agentRuntimeService = new AgentRuntimeService(db, userId, {
+      ...options?.runtimeOptions,
+      execSubAgentTask: this.execSubAgentTask.bind(this),
+    });
     this.marketService = new MarketService({ userInfo: { userId } });
     this.klavisService = new KlavisService({ db, userId });
   }
@@ -735,9 +738,12 @@ export class AiAgentService {
       };
 
       // Seed topic.metadata.runningOperation so heteroIngest can validate the operation.
+      // completionWebhook is stored so heteroFinish can call back to the IM bot-callback
+      // endpoint even though the hetero path bypasses the normal hook registration flow.
       await this.topicModel.updateMetadata(topicId, {
         runningOperation: {
           assistantMessageId: assistantMsg.id,
+          completionWebhook: hooks?.find((h) => h.type === 'onComplete')?.webhook,
           operationId,
           scope: appContext?.scope ?? undefined,
           threadId: appContext?.threadId ?? undefined,
