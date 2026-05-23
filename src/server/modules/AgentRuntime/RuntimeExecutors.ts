@@ -17,7 +17,6 @@ import { CredsIdentifier, type CredSummary, generateCredsList } from '@lobechat/
 import { LocalSystemManifest } from '@lobechat/builtin-tool-local-system';
 import { BRANDING_PROVIDER } from '@lobechat/business-const';
 import {
-  AGENT_DOCUMENT_INJECTION_POSITIONS,
   type AgentContextDocument,
   type BotPlatformContext,
   buildStepSkillDelta,
@@ -64,6 +63,8 @@ import {
   type ToolExecutionResultResponse,
   type ToolExecutionService,
 } from '@/server/services/toolExecution';
+import { archiveToolResultIfNeeded } from '@/server/services/toolExecution/archiveToolResult';
+import { toAgentContextDocuments } from '@/utils/agentDocumentContextMapping';
 
 import { dispatchClientTool } from './dispatchClientTool';
 import { formatErrorEventData } from './formatErrorEventData';
@@ -79,19 +80,6 @@ import { type IStreamEventManager } from './types';
 
 const log = debug('lobe-server:agent-runtime:streaming-executors');
 const timing = debug('lobe-server:agent-runtime:timing');
-
-const VALID_DOCUMENT_POSITIONS = new Set<AgentContextDocument['loadPosition']>(
-  AGENT_DOCUMENT_INJECTION_POSITIONS,
-);
-
-const normalizeDocumentPosition = (
-  position: string | null | undefined,
-): AgentContextDocument['loadPosition'] | undefined => {
-  if (!position) return undefined;
-  return VALID_DOCUMENT_POSITIONS.has(position as AgentContextDocument['loadPosition'])
-    ? (position as AgentContextDocument['loadPosition'])
-    : undefined;
-};
 
 // Tool pricing configuration (USD per call)
 const TOOL_PRICING: Record<string, number> = {
@@ -115,6 +103,40 @@ const getToolFailureKind = (result: ToolExecutionResultResponse): ToolFailureKin
 
 const shouldRetryTool = (kind: ToolFailureKind | undefined, attempt: number, maxRetries: number) =>
   kind === 'retry' && attempt <= maxRetries;
+
+const archiveRuntimeToolResult = async (
+  result: ToolExecutionResultResponse,
+  {
+    agentId,
+    identifier,
+    limit,
+    serverDB,
+    toolCallId,
+    topicId,
+    userId,
+  }: {
+    agentId?: string | null;
+    identifier?: string;
+    limit?: number;
+    serverDB: LobeChatDatabase;
+    toolCallId?: string;
+    topicId?: string | null;
+    userId?: string;
+  },
+): Promise<ToolExecutionResultResponse> => {
+  const archive = await archiveToolResultIfNeeded({
+    agentId,
+    content: result.content,
+    identifier,
+    limit,
+    serverDB,
+    toolCallId,
+    topicId,
+    userId,
+  });
+
+  return archive.content === result.content ? result : { ...result, content: archive.content };
+};
 
 // Builds a postProcessUrl callback that resolves S3 keys in file-backed fields
 // (imageList, videoList, fileList) to absolute URLs. Must be passed to every
@@ -143,6 +165,16 @@ const resolveLLMMaxRetries = (provider: string) =>
   // The branded provider already routes through its own fallback chain. Retrying
   // again here multiplies the same failed routed request across every channel.
   provider === BRANDING_PROVIDER ? 0 : LLM_MAX_RETRIES;
+
+const resolveRuntimeHistoryCount = (historyCount?: number) => {
+  if (historyCount === undefined) return undefined;
+
+  // Agent config stores historical message count, excluding the current turn.
+  // Runtime executors already pass the current user/tool turn in `llmPayload.messages`;
+  // without this +1, `historyCount: 0` truncates the current message too and sends
+  // `messages: []` to providers.
+  return historyCount + 1;
+};
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -332,7 +364,7 @@ export const createRuntimeExecutors = (
     // Get parentId from payload (parentId or parentMessageId depending on payload type)
     const parentId = llmPayload.parentId || (llmPayload as any).parentMessageId;
 
-    // Parent existence preflight (LOBE-7158 / LOBE-7154):
+    // Parent existence preflight ():
     // If the parent was deleted concurrently (e.g. user deleted topic mid-run),
     // assistant message creation below would hit a PG FK violation AFTER we've
     // already done the LLM call and spent tokens. Check first — fail fast,
@@ -396,7 +428,8 @@ export const createRuntimeExecutors = (
       const agentConfig = ctx.agentConfig;
       let processedMessages;
       if (agentConfig) {
-        const { LOBE_DEFAULT_MODEL_LIST } = await import('model-bank');
+        const { loadModels } = await import('@/business/client/model-bank/loadModels');
+        const builtinModels = await loadModels();
 
         // Extract <refer_topic> tags from messages and fetch summaries.
         // Skip if messages already contain injected topic_reference_context
@@ -436,20 +469,7 @@ export const createRuntimeExecutors = (
             const agentDocService = new AgentDocumentsService(ctx.serverDB, ctx.userId);
             const docs = await agentDocService.getAgentDocuments(agentId);
             if (docs.length > 0) {
-              agentDocuments = docs.map((doc) => ({
-                content: doc.content,
-                description: doc.description ?? undefined,
-                filename: doc.filename,
-                id: doc.id,
-                loadPosition: normalizeDocumentPosition(
-                  doc.policy?.context?.position || doc.policyLoadPosition,
-                ),
-                loadRules: doc.loadRules,
-                policyId: doc.templateId,
-                policyLoad: doc.policyLoad as 'always' | 'progressive',
-                policyLoadFormat: doc.policy?.context?.policyLoadFormat || doc.policyLoadFormat,
-                title: doc.title,
-              }));
+              agentDocuments = toAgentContextDocuments(docs);
               log('Resolved %d agent documents for agent %s', agentDocuments.length, agentId);
             }
           } catch (error) {
@@ -626,15 +646,13 @@ export const createRuntimeExecutors = (
           userTimezone: ctx.userTimezone,
           capabilities: {
             isCanUseFC: (m: string, p: string) => {
-              const info = LOBE_DEFAULT_MODEL_LIST.find(
-                (item) => item.id === m && item.providerId === p,
-              );
+              const info = builtinModels.find((item) => item.id === m && item.providerId === p);
               return info?.abilities?.functionCall ?? true;
             },
             isCanUseVideo: (m: string, p: string) => {
               const info =
-                LOBE_DEFAULT_MODEL_LIST.find((item) => item.id === m && item.providerId === p) ??
-                LOBE_DEFAULT_MODEL_LIST.find((item) => item.id === m);
+                builtinModels.find((item) => item.id === m && item.providerId === p) ??
+                builtinModels.find((item) => item.id === m);
               return info?.abilities?.video ?? false;
             },
             isCanUseVision: (m: string, p: string) => {
@@ -643,8 +661,8 @@ export const createRuntimeExecutors = (
               // fall back to a cross-provider lookup by model id when the
               // (model, provider) pair has no direct entry.
               const info =
-                LOBE_DEFAULT_MODEL_LIST.find((item) => item.id === m && item.providerId === p) ??
-                LOBE_DEFAULT_MODEL_LIST.find((item) => item.id === m);
+                builtinModels.find((item) => item.id === m && item.providerId === p) ??
+                builtinModels.find((item) => item.id === m);
               return info?.abilities?.vision ?? false;
             },
           },
@@ -653,7 +671,7 @@ export const createRuntimeExecutors = (
           enableHistoryCount: agentConfig.chatConfig?.enableHistoryCount ?? undefined,
           evalContext: ctx.evalContext,
           forceFinish: state.forceFinish,
-          historyCount: agentConfig.chatConfig?.historyCount ?? undefined,
+          historyCount: resolveRuntimeHistoryCount(agentConfig.chatConfig?.historyCount),
           initialContext: (state as any).initialContext?.initialContext,
           knowledge: {
             fileContents: agentConfig.files
@@ -906,7 +924,7 @@ export const createRuntimeExecutors = (
                 // self-reflection signal the model needs to fix its own output.
                 // Sanitization happens later, only at the persist boundaries
                 // (DB write and state.messages push) to protect strict providers
-                // replaying history. See LOBE-7761.
+                // replaying history. See .
                 const payload = resolvedCalls.map((p) => ({
                   ...p,
                   executor: resolved.executorMap?.[p.identifier],
@@ -1044,7 +1062,7 @@ export const createRuntimeExecutors = (
 
             // Sanitize tool_call `arguments` before persisting to DB so malformed
             // JSON (e.g. Qwen emitting `{, ...}`) can't poison future context
-            // builds and 400 strict providers like NVIDIA NIM. See LOBE-7761.
+            // builds and 400 strict providers like NVIDIA NIM. See .
             const persistedTools =
               toolsCalling.length > 0
                 ? toolsCalling.map((t) => ({
@@ -1687,8 +1705,18 @@ export const createRuntimeExecutors = (
               memoryToolPermission: agentConfig?.chatConfig?.memory?.toolPermission,
               messageId: state.metadata?.sourceMessageId,
               operationId,
+              projectSkills: (state.metadata?.operationSkillSet?.skills ?? [])
+                .filter(
+                  (skill: { location?: string; source?: string }) =>
+                    skill.source === 'project' && !!skill.location,
+                )
+                .map((skill: { location: string; name: string }) => ({
+                  location: skill.location,
+                  name: skill.name,
+                })),
               scope: state.metadata?.scope,
               serverDB: ctx.serverDB,
+              skipResultTruncation: true,
               taskId: state.metadata?.taskId,
               threadId: state.metadata?.threadId,
               toolCallId: chatToolPayload.id,
@@ -1706,7 +1734,15 @@ export const createRuntimeExecutors = (
         );
       }
 
-      const executionResult = execution.result;
+      const executionResult = await archiveRuntimeToolResult(execution.result, {
+        agentId: state.metadata?.agentId,
+        identifier: chatToolPayload.identifier,
+        limit: toolResultMaxLength,
+        serverDB: ctx.serverDB,
+        toolCallId: chatToolPayload.id,
+        topicId: ctx.topicId ?? state.metadata?.topicId,
+        userId: ctx.userId,
+      });
       const executionTime = executionResult.executionTime;
       const isSuccess = executionResult.success;
       if (ctx.hookDispatcher) {
@@ -1754,7 +1790,7 @@ export const createRuntimeExecutors = (
       // Finally persist to database. In resumption mode (skipCreateToolMessage),
       // the pending tool message already exists from request_human_approve, so
       // we update it in-place rather than inserting a new row — inserting would
-      // either duplicate the tool_call_id or violate parent_id FK (LOBE-7154).
+      // either duplicate the tool_call_id or violate parent_id FK ().
       let toolMessageId: string | undefined;
       try {
         if (payload.skipCreateToolMessage) {
@@ -1918,7 +1954,7 @@ export const createRuntimeExecutors = (
     } catch (error) {
       // Persist-level failures (parent FK violation etc.) must propagate so
       // the step fails — otherwise the swallow-and-continue path keeps
-      // running the agent on a broken conversation chain. See LOBE-7158.
+      // running the agent on a broken conversation chain. See .
       if (isPersistFatal(error)) throw error;
 
       if (ctx.hookDispatcher) {
@@ -2163,6 +2199,7 @@ export const createRuntimeExecutors = (
                   operationId,
                   scope: state.metadata?.scope,
                   serverDB: ctx.serverDB,
+                  skipResultTruncation: true,
                   taskId: state.metadata?.taskId,
                   threadId: state.metadata?.threadId,
                   toolCallId: chatToolPayload.id,
@@ -2180,7 +2217,15 @@ export const createRuntimeExecutors = (
             );
           }
 
-          const executionResult = execution.result;
+          const executionResult = await archiveRuntimeToolResult(execution.result, {
+            agentId: state.metadata?.agentId,
+            identifier: chatToolPayload.identifier,
+            limit: batchAgentConfig?.chatConfig?.toolResultMaxLength,
+            serverDB: ctx.serverDB,
+            toolCallId: chatToolPayload.id,
+            topicId: ctx.topicId ?? state.metadata?.topicId,
+            userId: ctx.userId,
+          });
           const executionTime = executionResult.executionTime;
           const isSuccess = executionResult.success;
           if (ctx.hookDispatcher) {
@@ -2249,7 +2294,7 @@ export const createRuntimeExecutors = (
             // Normalize BEFORE publishing — clients treat `error` stream
             // events as terminal and surface `event.data.error` directly, so
             // a raw SQL error here would leak driver text to the user before
-            // the ConversationParentMissing throw is consumed. See LOBE-7158.
+            // the ConversationParentMissing throw is consumed. See .
             const fatal = isParentMessageMissingError(error)
               ? createConversationParentMissingError(parentMessageId, error)
               : error instanceof Error
@@ -2855,7 +2900,7 @@ export const createRuntimeExecutors = (
           // newState.messages. When the approval resumes, the `call_tool`
           // executor (skip-create branch) appends the resolved tool message
           // to state.messages itself. Pushing a placeholder here produced
-          // two entries for the same tool_call_id — see LOBE-7151 review P2.
+          // two entries for the same tool_call_id — see review P2.
 
           log(
             '[%s:%d] Created pending tool message %s for %s',
@@ -2972,7 +3017,7 @@ export const createRuntimeExecutors = (
           error,
         );
         // Normalize BEFORE publishing so clients surface the typed business
-        // error instead of the raw driver text (see LOBE-7158 review).
+        // error instead of the raw driver text (see review).
         const fatal = isParentMessageMissingError(error)
           ? createConversationParentMissingError(parentMessageId, error)
           : error instanceof Error
