@@ -9,6 +9,8 @@ const mockEnv = vi.hoisted(() => ({
 }));
 
 const mockClient = vi.hoisted(() => ({
+  executeMcpCall: vi.fn(),
+  executeMessageApi: vi.fn(),
   executeToolCall: vi.fn(),
   getDeviceSystemInfo: vi.fn(),
   queryDeviceList: vi.fn(),
@@ -84,18 +86,24 @@ describe('DeviceProxy', () => {
       expect(result).toEqual([]);
     });
 
-    it('should transform connectedAt to lastSeen and set online: true', async () => {
+    it('should map device-centric channels to lastSeen + online and flatten channels', async () => {
       mockEnv.DEVICE_GATEWAY_URL = 'https://gateway.example.com';
       mockEnv.DEVICE_GATEWAY_SERVICE_TOKEN = 'token';
-      const connectedAt = '2025-01-15T10:30:00Z';
+      const connectedAt = Date.parse('2025-01-15T10:30:00Z');
+      const iso = new Date(connectedAt).toISOString();
       mockClient.queryDeviceList.mockResolvedValue([
         {
+          channels: [
+            { channel: 'desktop', connectedAt, connectionId: 'conn-a' },
+            { channel: 'cli', connectedAt, connectionId: 'conn-b' },
+          ],
           connectedAt,
           deviceId: 'dev-1',
           hostname: 'my-laptop',
           platform: 'darwin',
         },
         {
+          channels: [{ channel: 'desktop', connectedAt, connectionId: 'conn-c' }],
           connectedAt,
           deviceId: 'dev-2',
           hostname: 'my-desktop',
@@ -108,21 +116,49 @@ describe('DeviceProxy', () => {
 
       expect(result).toEqual([
         {
+          channels: [
+            { channel: 'desktop', connectedAt: iso, connectionId: 'conn-a' },
+            { channel: 'cli', connectedAt: iso, connectionId: 'conn-b' },
+          ],
+          deviceId: 'dev-1',
+          hostname: 'my-laptop',
+          lastSeen: iso,
+          online: true,
+          platform: 'darwin',
+        },
+        {
+          channels: [{ channel: 'desktop', connectedAt: iso, connectionId: 'conn-c' }],
+          deviceId: 'dev-2',
+          hostname: 'my-desktop',
+          lastSeen: iso,
+          online: true,
+          platform: 'win32',
+        },
+      ]);
+      expect(mockClient.queryDeviceList).toHaveBeenCalledWith('user-1');
+    });
+
+    it('tolerates a legacy gateway response without channels', async () => {
+      mockEnv.DEVICE_GATEWAY_URL = 'https://gateway.example.com';
+      mockEnv.DEVICE_GATEWAY_SERVICE_TOKEN = 'token';
+      const connectedAt = Date.parse('2025-01-15T10:30:00Z');
+      mockClient.queryDeviceList.mockResolvedValue([
+        { connectedAt, deviceId: 'dev-1', hostname: 'my-laptop', platform: 'darwin' },
+      ]);
+
+      const proxy = new DeviceProxy();
+      const result = await proxy.queryDeviceList('user-1');
+
+      expect(result).toEqual([
+        {
+          channels: [],
           deviceId: 'dev-1',
           hostname: 'my-laptop',
           lastSeen: new Date(connectedAt).toISOString(),
           online: true,
           platform: 'darwin',
         },
-        {
-          deviceId: 'dev-2',
-          hostname: 'my-desktop',
-          lastSeen: new Date(connectedAt).toISOString(),
-          online: true,
-          platform: 'win32',
-        },
       ]);
-      expect(mockClient.queryDeviceList).toHaveBeenCalledWith('user-1');
     });
 
     it('should return empty array on error', async () => {
@@ -251,6 +287,134 @@ describe('DeviceProxy', () => {
       expect(result).toEqual({
         content: 'Device tool call error: string error',
         error: 'string error',
+        success: false,
+      });
+    });
+  });
+
+  describe('executeMcpCall', () => {
+    const mcpCall = {
+      apiName: 'getStock',
+      arguments: '{"symbol":"AAPL"}',
+      deviceId: 'dev-1',
+      identifier: 'kimi-datasource',
+      params: {
+        args: ['stock-mcp'],
+        command: 'npx',
+        env: { TOKEN: 'secret' },
+        name: 'kimi-datasource',
+        type: 'stdio' as const,
+      },
+      userId: 'user-1',
+    };
+
+    it('should return error when not configured', async () => {
+      const proxy = new DeviceProxy();
+      const result = await proxy.executeMcpCall(mcpCall);
+
+      expect(result).toEqual({
+        content: 'Device Gateway is not configured',
+        error: 'GATEWAY_NOT_CONFIGURED',
+        success: false,
+      });
+    });
+
+    it('should forward the mcp call with default timeout', async () => {
+      mockEnv.DEVICE_GATEWAY_URL = 'https://gateway.example.com';
+      mockEnv.DEVICE_GATEWAY_SERVICE_TOKEN = 'token';
+      const expected = { content: 'stock data', state: { rows: 3 }, success: true };
+      mockClient.executeMcpCall.mockResolvedValue(expected);
+
+      const proxy = new DeviceProxy();
+      const result = await proxy.executeMcpCall(mcpCall);
+
+      expect(result).toEqual(expected);
+      expect(mockClient.executeMcpCall).toHaveBeenCalledWith({ ...mcpCall, timeout: 30_000 });
+    });
+
+    it('should use custom timeout', async () => {
+      mockEnv.DEVICE_GATEWAY_URL = 'https://gateway.example.com';
+      mockEnv.DEVICE_GATEWAY_SERVICE_TOKEN = 'token';
+      mockClient.executeMcpCall.mockResolvedValue({ content: 'ok', success: true });
+
+      const proxy = new DeviceProxy();
+      await proxy.executeMcpCall(mcpCall, 60_000);
+
+      expect(mockClient.executeMcpCall).toHaveBeenCalledWith({ ...mcpCall, timeout: 60_000 });
+    });
+
+    it('should return error result on exception', async () => {
+      mockEnv.DEVICE_GATEWAY_URL = 'https://gateway.example.com';
+      mockEnv.DEVICE_GATEWAY_SERVICE_TOKEN = 'token';
+      mockClient.executeMcpCall.mockRejectedValue(new Error('connection refused'));
+
+      const proxy = new DeviceProxy();
+      const result = await proxy.executeMcpCall(mcpCall);
+
+      expect(result).toEqual({
+        content: 'Device MCP call error: connection refused',
+        error: 'connection refused',
+        success: false,
+      });
+    });
+  });
+
+  describe('executeMessageApi', () => {
+    const params = { deviceId: 'dev-1', userId: 'user-1' };
+    const api = { apiName: 'sendText', payload: { chatGuid: 'chat-1' }, platform: 'imessage' };
+
+    it('should return error when not configured', async () => {
+      const proxy = new DeviceProxy();
+      const result = await proxy.executeMessageApi(params, api);
+
+      expect(result).toEqual({
+        content: 'Device Gateway is not configured',
+        error: 'GATEWAY_NOT_CONFIGURED',
+        success: false,
+      });
+    });
+
+    it('should execute message API with default timeout', async () => {
+      mockEnv.DEVICE_GATEWAY_URL = 'https://gateway.example.com';
+      mockEnv.DEVICE_GATEWAY_SERVICE_TOKEN = 'token';
+      const expected = { content: '{"ok":true}', success: true };
+      mockClient.executeMessageApi.mockResolvedValue(expected);
+
+      const proxy = new DeviceProxy();
+      const result = await proxy.executeMessageApi(params, api);
+
+      expect(result).toEqual(expected);
+      expect(mockClient.executeMessageApi).toHaveBeenCalledWith(
+        { deviceId: 'dev-1', timeout: 30_000, userId: 'user-1' },
+        api,
+      );
+    });
+
+    it('should use custom timeout', async () => {
+      mockEnv.DEVICE_GATEWAY_URL = 'https://gateway.example.com';
+      mockEnv.DEVICE_GATEWAY_SERVICE_TOKEN = 'token';
+      mockClient.executeMessageApi.mockResolvedValue({ content: 'ok', success: true });
+
+      const proxy = new DeviceProxy();
+      await proxy.executeMessageApi(params, api, 60_000);
+
+      expect(mockClient.executeMessageApi).toHaveBeenCalledWith(
+        { deviceId: 'dev-1', timeout: 60_000, userId: 'user-1' },
+        api,
+      );
+    });
+
+    it('should return error result on exception', async () => {
+      mockEnv.DEVICE_GATEWAY_URL = 'https://gateway.example.com';
+      mockEnv.DEVICE_GATEWAY_SERVICE_TOKEN = 'token';
+      mockClient.executeMessageApi.mockRejectedValue(new Error('connection refused'));
+
+      const proxy = new DeviceProxy();
+      const result = await proxy.executeMessageApi(params, api);
+
+      expect(result).toEqual({
+        content: 'Device message API error: connection refused',
+        error: 'connection refused',
         success: false,
       });
     });

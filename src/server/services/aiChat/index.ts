@@ -29,14 +29,11 @@ interface GetMessagesAndTopicsParams {
 }
 
 export class AiChatService {
-  private userId: string;
   private messageModel: MessageModel;
   private fileService: FileService;
   private topicModel: TopicModel;
 
   constructor(serverDB: LobeChatDatabase, userId: string) {
-    this.userId = userId;
-
     this.messageModel = new MessageModel(serverDB, userId);
     this.topicModel = new TopicModel(serverDB, userId);
     this.fileService = new FileService(serverDB, userId);
@@ -59,7 +56,8 @@ export class AiChatService {
       'lambda.aiChat.messagesAndTopics.messageModel.query',
       () =>
         this.messageModel.query(messageParams, {
-          postProcessUrl: (path) => this.fileService.getFullFileUrl(path),
+          postProcessUrl: (path, file) =>
+            this.fileService.getFileAccessUrl({ id: file.id, url: path }),
           ...(messageTiming ? { timing: messageTiming } : {}),
         }),
       {

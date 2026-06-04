@@ -1,10 +1,64 @@
 import type { TaskDetail, UIChatMessage } from '../message';
 import type { ChatTopic } from '../topic';
 
+export type AgentSignalOperationKind =
+  | 'memory'
+  | 'nightly-review'
+  | 'self-feedback-intent'
+  | 'self-reflection'
+  | 'skill';
+
+/**
+ * Run-scoped Agent Signal marker stamped onto a background agent operation at
+ * dispatch. It travels on `appContext.agentSignal`, lands in
+ * `state.metadata.agentSignal`, and is read back on the completion path to
+ * project receipts / briefs (the `agent.execution.completed` payload itself only
+ * carries `agentId/operationId/topicId`). Runtime parsing/validation helpers live
+ * server-side in `operationMarker.ts`.
+ */
+export interface AgentSignalOperationMarker {
+  /**
+   * The reviewed user agent a resulting receipt should be attributed to. Needed
+   * when the run executes under a builtin self-iteration slug (whose resolved
+   * operation agentId is the builtin agent, not the user's agent); the
+   * completion projector prefers this over the run's agentId.
+   */
+  agentId?: string;
+  /** Assistant message a resulting receipt should anchor to. */
+  anchorMessageId?: string;
+  /** Discriminator the completion handler dispatches on. */
+  kind: AgentSignalOperationKind;
+  /** Local review date (YYYY-MM-DD) for nightly review brief/receipt writes. */
+  localDate?: string;
+  /** Review window end (ISO) — lets tools re-derive the evidence digest. */
+  reviewWindowEnd?: string;
+  /** Review window start (ISO). */
+  reviewWindowStart?: string;
+  /** Stable producer source id of the originating signal. */
+  sourceId?: string;
+  /** Topic the run is scoped to. */
+  topicId?: string;
+  /** User message that initiated the originating feedback. */
+  triggerMessageId?: string;
+}
+
 /**
  * Application context for message storage
  */
 export interface ExecAgentAppContext {
+  /**
+   * Agent document row id (`agent_documents.id`) for the document the user is
+   * currently viewing. When supplied, the active document context is built
+   * directly without a `listDocumentsForTopic` reverse lookup, so docs opened
+   * outside the active topic (skills, web docs) still carry `agent_document_id`
+   * for downstream tool calls.
+   */
+  agentDocumentId?: string | null;
+  /**
+   * Run-scoped Agent Signal marker for background self-iteration / memory runs.
+   * Forwarded into the operation so the completion path can project receipts.
+   */
+  agentSignal?: AgentSignalOperationMarker;
   /** Optional default assignee candidate for task manager prompts */
   defaultTaskAssigneeAgentId?: string;
   /** Current document ID for page-scoped conversations */
@@ -23,6 +77,14 @@ export interface ExecAgentAppContext {
   scope?: string | null;
   /** Session ID */
   sessionId?: string;
+  /** Optional assistant message id that anchors the run (e.g. parent for an isolated thread). */
+  sourceMessageId?: string;
+  /**
+   * Suppresses AgentSignal `agent.user.message` re-emission when this run is itself driven by a
+   * background/builtin agent. Required for self-iteration / memory-writer / skill-manager runs to
+   * avoid recursion into the analyzeIntent pipeline.
+   */
+  suppressSignal?: boolean;
   /** Current task identifier when executing from a task detail surface */
   taskId?: string | null;
   /** Thread ID for threaded conversations */
@@ -58,13 +120,6 @@ export interface ExecAgentParams {
   appContext?: ExecAgentAppContext;
   /** Whether to auto-start execution after creating operation (default: true) */
   autoStart?: boolean;
-  /**
-   * Runtime of the client initiating this request. Used by the server to
-   * enable `executor: 'client'` tools (e.g. local-system) when the caller
-   * is a desktop Electron client that will receive `tool_execute` events
-   * over the same Agent Gateway WebSocket.
-   */
-  clientRuntime?: 'desktop' | 'web';
   /** Explicit device ID to bind to the topic and activate for this run */
   deviceId?: string;
   /** Optional existing message IDs to include in context */
