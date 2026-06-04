@@ -3,15 +3,16 @@ import type {
   DOCUMENT_TEMPLATES,
   DocumentLoadRules,
   DocumentTemplateSet,
-  PolicyLoad,
 } from '@lobechat/agent-templates';
-import { DocumentLoadPosition, getDocumentTemplate } from '@lobechat/agent-templates';
+import { DocumentLoadPosition, getDocumentTemplate, PolicyLoad } from '@lobechat/agent-templates';
 import { buildAgentSkillIdentifier } from '@lobechat/const';
 import type { LobeChatDatabase } from '@lobechat/database';
 import { DOCUMENT_FOLDER_TYPE } from '@lobechat/database/schemas';
 
 import type {
   AgentDocument,
+  AgentDocumentContextPayload,
+  AgentDocumentContextRow,
   AgentDocumentWithRules,
   ToolUpdateLoadRule,
 } from '@/database/models/agentDocuments';
@@ -26,6 +27,7 @@ import { TopicDocumentModel } from '@/database/models/topicDocument';
 import { AgentDocumentVfsError } from '../agentDocumentVfs/errors';
 import { isManagedSkillDocument } from '../agentDocumentVfs/mounts/skills/providers/providerSkillsAgentDocumentUtils';
 import { DocumentService } from '../document';
+import { TOOL_RESULTS_DIR_NAME } from '../toolExecution/constants';
 import {
   type AgentDocumentLiteXMLOperation,
   applyLiteXMLOperations,
@@ -34,6 +36,14 @@ import {
 } from './headlessEditor';
 
 const MAX_UNIQUE_FILENAME_ATTEMPTS = 1000;
+
+const appendFilenameSuffix = (filename: string, suffix: number): string => {
+  const dotIndex = filename.lastIndexOf('.');
+
+  if (dotIndex <= 0) return `${filename}-${suffix}`;
+
+  return `${filename.slice(0, dotIndex)}-${suffix}${filename.slice(dotIndex)}`;
+};
 
 interface UpsertDocumentParams {
   agentId: string;
@@ -54,6 +64,58 @@ interface CreateAgentDocumentOptions {
 }
 
 type AgentDocumentWithLiteXML = AgentDocument & { litexml?: string };
+type ProjectableAgentDocument = Pick<
+  AgentDocument,
+  'content' | 'editorData' | 'fileType' | 'templateId'
+>;
+
+/**
+ * Hide the auto-created `.tool-results/` archive (root folder + its children)
+ * from user-facing document lists. Agents still discover archived entries via
+ * the tool-oriented `listDocuments` / `listDocumentsForTopic` paths, which hit
+ * the model directly.
+ */
+const excludeArchivedToolResults = <
+  T extends Pick<AgentDocument, 'documentId' | 'parentId' | 'filename' | 'fileType'>,
+>(
+  docs: T[],
+): T[] => {
+  const archiveFolderIds = new Set(
+    docs
+      .filter(
+        (d) =>
+          d.filename === TOOL_RESULTS_DIR_NAME &&
+          !d.parentId &&
+          d.fileType === DOCUMENT_FOLDER_TYPE,
+      )
+      .map((d) => d.documentId),
+  );
+  if (archiveFolderIds.size === 0) return docs;
+  return docs.filter(
+    (d) =>
+      !archiveFolderIds.has(d.documentId) && (!d.parentId || !archiveFolderIds.has(d.parentId)),
+  );
+};
+
+const toAgentDocumentContextPayload = (
+  doc: AgentDocumentContextRow,
+): AgentDocumentContextPayload => ({
+  content: doc.content,
+  contentCharCount: doc.contentCharCount,
+  description: doc.description,
+  filename: doc.filename,
+  id: doc.id,
+  isFolder: doc.isFolder,
+  loadRules: doc.loadRules,
+  policy: doc.policy,
+  policyLoad: doc.policyLoad,
+  policyLoadFormat: doc.policyLoadFormat,
+  policyLoadPosition: doc.policyLoadPosition,
+  sourceType: doc.sourceType,
+  templateId: doc.templateId,
+  title: doc.title,
+  updatedAt: doc.updatedAt,
+});
 
 /**
  * Service for managing agent documents with reusable template sets.
@@ -70,13 +132,11 @@ export class AgentDocumentsService {
     this.topicDocumentModel = new TopicDocumentModel(db, userId);
   }
 
-  private async projectDocumentContent<T extends AgentDocument | AgentDocumentWithRules>(
-    doc: T,
-  ): Promise<T>;
-  private async projectDocumentContent<T extends AgentDocument | AgentDocumentWithRules>(
+  private async projectDocumentContent<T extends ProjectableAgentDocument>(doc: T): Promise<T>;
+  private async projectDocumentContent<T extends ProjectableAgentDocument>(
     doc: T | undefined,
   ): Promise<T | undefined>;
-  private async projectDocumentContent<T extends AgentDocument | AgentDocumentWithRules>(
+  private async projectDocumentContent<T extends ProjectableAgentDocument>(
     doc: T | undefined,
   ): Promise<T | undefined> {
     if (!doc?.editorData) return doc;
@@ -160,7 +220,7 @@ export class AgentDocumentsService {
         );
       }
 
-      filename = `${baseFilename}-${suffix}`;
+      filename = appendFilenameSuffix(baseFilename, suffix);
       suffix += 1;
     }
 
@@ -234,7 +294,24 @@ export class AgentDocumentsService {
 
   async getAgentDocuments(agentId: string): Promise<AgentDocumentWithRules[]> {
     const docs = await this.agentDocumentModel.findByAgent(agentId);
-    return this.projectDocuments(docs);
+    return this.projectDocuments(excludeArchivedToolResults(docs));
+  }
+
+  async getAgentContextDocuments(agentId: string): Promise<AgentDocumentContextPayload[]> {
+    const docs = excludeArchivedToolResults(
+      await this.agentDocumentModel.findContextByAgent(agentId),
+    );
+
+    const projectedDocs = await Promise.all(
+      docs.map(async (doc) => {
+        if (doc.policyLoad !== PolicyLoad.ALWAYS) return doc;
+
+        const projected = await this.projectDocumentContent(doc);
+        return { ...projected, ...deriveAgentDocumentFields(projected) };
+      }),
+    );
+
+    return projectedDocs.map(toAgentDocumentContextPayload);
   }
 
   /**
@@ -258,7 +335,7 @@ export class AgentDocumentsService {
       title: string | null;
     }>
   > {
-    const docs = await this.getAgentDocuments(agentId);
+    const docs = await this.agentDocumentModel.findSkillDocsByAgent(agentId);
 
     const childrenByParent = new Map<string, AgentDocumentWithRules[]>();
     for (const doc of docs) {
@@ -305,6 +382,16 @@ export class AgentDocumentsService {
 
   async getDocumentById(id: string, expectedAgentId?: string) {
     return this.getDocumentByIdInAgent(id, expectedAgentId);
+  }
+
+  /**
+   * Resolve an `agent_documents` row from `(agentId, documentId)`. Use when the
+   * caller has a `documents.id` but needs the row id (e.g. when building the
+   * `<document agent_document_id ... />` injection from a portal payload).
+   * Returns undefined when the agent does not own this document binding.
+   */
+  async findRowByDocumentId(agentId: string, documentId: string) {
+    return this.agentDocumentModel.findByDocumentId(agentId, documentId);
   }
 
   async getDocumentSnapshotById(id: string, expectedAgentId?: string) {
